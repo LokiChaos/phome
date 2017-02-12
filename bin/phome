@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+# Author: LokiChaos ©2016 Released under the ISC License
+
+# Requires fuse, encfs, bindfs, sudo
+
+NORMAL=$(tput sgr 0)
+ERROR=$(tput setaf 1)
+OK=$(tput setaf 2)
+WARN=$(tput setaf 3)
+INFO=$(tput setaf 7)
+
+printmsg(){
+	printf "${INFO}$1${NORMAL}\n"
+}
+
+echoHelp(){
+	printmsg "Portable Home (phome) usage:"
+	printmsg "    phome mount [{base|data|secure|private [name]|all}]"
+	printmsg "    phome umount [{base|data|secure|private [name]|all}]"
+	printmsg "    phome status"
+	printmsg "    phome overlay"
+	printmsg "    phome deoverlay"
+	printmsg "    phome help"
+}
+
+okfail(){
+	col=$(tput cols)
+	if $@; then
+		printf "%*s\n" $col "[${OK}OK${NORMAL}]"
+	else
+		printf "%*s\n" $col "[${ERROR}FAILED${NORMAL}]"
+	fi
+}
+
+ismounted(){
+	mount | grep -q "on $1"
+}
+
+printmounted(){
+	if ismounted $1; then
+		printf " %-*s ${OK}mounted${NORMAL}\n" 25 "$2"
+	else
+		printf " %-*s ${ERROR}not mounted${NORMAL}\n" 25 "$2"
+	fi
+}
+
+printoverlaid(){
+	if mount | grep -q "/bind/decrypt/.overlay/$1 on $HOME/$1"; then
+		printf " %-*s ${OK}applied${NORMAL}\n" 25 "$2"
+	else
+		printf " %-*s ${ERROR}not applied${NORMAL}\n" 25 "$2"
+	fi
+
+}
+
+uuidexitsts(){
+	ls -l /dev/disk/by-uuid|grep -q "$1"
+}
+
+bindmount(){
+	mkdir $2 && bindfs -n $1 $2 && return 0 || return 1
+}
+
+fumount(){
+	fusermount -u $1 && rmdir $1 && return 0 || return 1
+}
+
+phmntbase(){
+	if ! ismounted $HOME/.phome/mount; then
+		printmsg "Mounting phome device"
+		okfail sudo mount -U "$UUID" $HOME/.phome/mount
+	fi
+
+	if ! ismounted $HOME/.phome/bind; then
+		# Bind real mountpount to mask UniqueUID -> Local User
+		printmsg "Mounting user-masking bind"
+		okfail sudo bindfs --map=$MUID/$USR:@$MGID/@$GRP $UHOME/.phome/mount/.phome $UHOME/.phome/bind
+	fi
+}
+
+phmntdata(){
+	if ! ismounted $HOME/phdata; then
+		# Mount ~/phdata
+		printmsg "Mounting ~/phdata bind"
+		#okfail mkdir $HOME/phdata && bindfs -n $HOME/.phome/bind/data $HOME/phdata
+		okfail bindmount $HOME/.phome/bind/data $HOME/phdata
+	fi
+}
+
+phmntenc(){
+	if ! ismounted $HOME/.phome/bind/decrypt; then
+		printmsg "Mounting EncFS"
+		okfail encfs $HOME/.phome/bind/crypt $HOME/.phome/bind/decrypt
+		# Will prompt for key here
+	fi
+	if ismounted $HOME/.phome/bind/decrypt; then	
+		if ! ismounted $HOME/phsecure; then
+			printmsg "Mounting ~/phsecure bind"
+			# Bind portable dirs
+			okfail mkdir $HOME/phsecure && bindfs -n $HOME/.phome/bind/decrypt $HOME/phsecure
+		fi
+	else
+		printmsg "${ERROR}EncFS not mounted. Not mounting ~/phsecure bind"
+		okfail false
+	fi
+}
+
+phmntprivate(){
+	case "$1" in
+	all|a)
+		for PM in $HOME/.phome/bind/private/*/; do
+			PMF=$(basename $PM)
+			phmntpri $PMF
+		done
+		;;
+	*)
+		if [ -d "$HOME/.phome/bind/private/$1" ]; then
+			phmntpri $1
+		else
+			printmsg "${ERROR}EncFS '$1' does not exist"
+		fi
+		;;
+	esac
+}
+
+phmntpri(){
+	printmsg "Mounting '$1' EncFS to ~/phprivate/$1"
+	mkdir -p $HOME/phprivate/$1
+	# Mount EncFS
+	if ! ismounted $HOME/phprivate/$1; then
+		okfail encfs $HOME/.phome/bind/private/$1 $HOME/phprivate/$1
+		# Will prompt for key here
+	fi
+}
+
+phumntprivate(){
+	case "$1" in
+	all|a)
+		if [ -d $HOME/phprivate ]; then
+			for PM in $HOME/phprivate/*/; do
+				PMF=$(basename $PM)
+				phumntpri $PMF
+			done
+		fi
+		;;
+	*)
+		if [ -d "$HOME/.phome/bind/private/$1" ]; then
+			phumntpri $1
+		else
+			printmsg "${ERROR}EncFS '$1' does not exist"
+			okfail false
+		fi
+		;;
+	esac
+}
+
+phumntpri(){
+	if ismounted $HOME/phprivate/$1; then
+		printmsg "Unmounting '$1' EncFS from ~/phprivate/$1"
+		okfail fusermount -u $HOME/phprivate/$1
+		# Try to clean up ~/phprivate
+		rmdir --ignore-fail-on-non-empty $HOME/phprivate/$1
+		rmdir --ignore-fail-on-non-empty $HOME/phprivate/
+	else
+		printmsg "${WARN}EncFS '$1' not mounted"
+	fi
+}
+
+phumntenc(){
+	if ismounted $HOME/phsecure; then
+		printmsg "Unmounting ~/phsecure bind"
+		okfail fumount $HOME/phsecure
+	fi
+	if ismounted $HOME/.phome/bind/decrypt; then
+		printmsg "Unmounting EncFS"
+		okfail fusermount -u $HOME/.phome/bind/decrypt
+	fi
+}
+
+phumntdata(){
+	if ismounted $HOME/phdata; then
+		printmsg "Unmounting ~/phdata bind"
+		okfail fumount $HOME/phdata
+	fi
+}
+
+phumntbase(){
+	if ismounted $HOME/.phome/bind; then
+		printmsg "Unmounting phome user-masking bind"
+		# UnBind masked mountpoint
+		okfail sudo fusermount -u $UHOME/.phome/bind
+	fi
+
+	if ismounted $HOME/.phome/mount; then
+		printmsg "Unmounting phome device"
+		# Unmount real mountpoint
+		okfail sudo umount $UHOME/.phome/mount
+	fi
+}
+
+phoverlay(){
+	if ismounted $HOME/.phome/bind/decrypt; then
+		if [ ! -z "$1" ]; then
+			phover $1
+		else
+			for OV in ${OVERLAY[@]}; do
+				phover "$OV"
+			done
+		fi
+	else
+		printmsg "${ERROR}EncFS not mounted. Not binding overlays."
+		okfail false
+	fi
+}
+
+phover(){
+	if ismounted $HOME/.phome/bind/decrypt; then
+		if [ -d $HOME/.phome/bind/decrypt/.overlay/$1 ]; then
+			if [ ! -d $HOME/$1 ]; then
+				printmsg "'~/$1' does not exist, making it."
+				mkdir $HOME/$1
+			fi
+			if ! ismounted $HOME/$1; then
+				printmsg "Binding secure phome overlay onto '~/$1'"
+				okfail bindfs -n -o nonempty $HOME/.phome/bind/decrypt/.overlay/$1 $HOME/$1
+			else
+				printmsg "${WARN}Skipping overlay for ~/$1: overlay already applied."
+				okfail false
+			fi
+		else
+			printmsg "${WARN}Skipping overlay for ~/$1: overlay does not exist."
+			okfail false
+		fi
+	else
+		printmsg "${ERROR}EncFS not mounted. Not binding overlays."
+		okfail false
+	fi
+}
+
+phdeoverlay(){
+	if [ ! -z "$1" ]; then
+		phdeover "$1"
+	else
+		for OV in ${OVERLAY[@]}; do
+			phdeover "$OV"
+		done
+	fi
+}
+
+phdeover(){
+	if ismounted $HOME/$1; then
+		printmsg "Unbinding secure phome overlay from '~/$1'"
+		okfail fusermount -u $HOME/$1
+	else
+		printmsg "${WARN}No overlay on $HOME/$1."
+		okfail false
+	fi
+
+}
+
+mkefs(){
+	if [ ! -z "$1" ]; then
+		if ismounted $HOME/.phome/bind; then
+			if [ ! -d "$HOME/.phome/bind/private/$1" ]; then
+				mkdir $HOME/.phome/bind/private/$1
+				phmntpri $1
+			else
+				printmsg "${ERROR}'$1' already exists?"
+				okfail false
+			fi
+		else
+			printmsg "${ERROR}phome base is not mounted, cannot create private encfs"
+			okfail false
+		fi
+	else
+		printmsg "${ERROR}Must supply a EncFS name"
+	fi
+}
+
+phmnt(){
+	case "$1" in
+		all | a)
+			phmntbase
+			phmntdata
+			phmntenc
+			phoverlay
+			phmntprivate all
+			;;
+		"")
+			phmntbase
+			phmntdata
+			phmntenc
+			phoverlay
+			;;
+		data|d)
+			phmntbase
+			phmntdata
+			;;
+		secure|s)
+			phmntbase
+			phmntenc
+			;;
+		base|b)
+			phmntbase
+			;;
+		private|p)
+			phmntbase
+			phmntprivate $2
+			;;
+		*)
+			printmsg "${ERROR}'$1' is not a valid mount option"
+			exit 1
+	esac
+}
+
+phumnt(){
+	case "$1" in
+		all|a|base|"")
+			phdeoverlay
+			phumntprivate all
+			phumntenc
+			phumntdata
+			phumntbase
+			;;
+		data|d)
+			phumntdata
+			;;
+		secure|s)
+			phdeoverlay
+			phumntenc
+			;;
+		private|p)
+			phumntprivate $2
+			;;
+		*)
+			printmsg "${ERROR}'$1' is not a valid unmount option"
+			exit 1
+	esac
+}
+
+
+phstatus(){
+	printmsg "${HEADER}Portable Home (phome)      Status"
+	if uuidexitsts "$UUID"; then
+		printf " %-*s ${OK}exists${NORMAL}\n" 25 "phome device"
+	else
+		printf " %-*s ${ERROR}does not exist${NORMAL}\n" 25 "phome device"
+	fi
+	printmounted $HOME/.phome/mount "phome base mount"
+	printmounted $HOME/.phome/bind "phome masking bind"
+	printmounted $HOME/.phome/bind/decrypt "phome EncFS"
+	printmsg "Mounts:"
+	printmounted $HOME/phdata "~/phdata"
+	printmounted $HOME/phsecure "~/phsecure"
+	for PM in $HOME/.phome/bind/private/*/; do
+		PMF=$(basename $PM)
+		printmounted $HOME/phprivate/$PMF "~/phprivate/$PMF"
+	done
+	printmsg "Overlays:"
+	for OV in ${OVERLAY[@]}; do
+		printoverlaid "$OV" "~/$OV"
+	done
+}
+
+if [ -z "$1" ];then
+	echoHelp
+	exit 1
+fi
+
+USR=$USER
+GRP=$(id -gn)
+UHOME=$HOME
+source $HOME/.phome/config
+
+case "$1" in
+mount|m)
+	phmnt $2 $3
+	;;
+umount|u)
+	phumnt $2 $3
+	;;
+overlay|o)
+	phoverlay $2
+	;;
+deoverlay|d)
+	phdeoverlay $2
+	;;
+status|s|stat)
+	phstatus
+	;;
+mkencfs|mkprivate)
+	mkefs $2
+	;;
+help|h)
+	echoHelp
+	exit 0
+	;;
+*)
+	printmsg "${ERROR}Error '$1' is not a valid sub command."
+	echoHelp
+	exit 1
+	;;
+esac

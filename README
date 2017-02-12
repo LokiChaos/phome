@@ -1,0 +1,9 @@
+Portable home overlay
+
+Just a little script that manages mounting/unmounting a portable overlay off a removable drive.
+
+To install copy this repo to the drive and run ./initph.sh $USER $DEVICE
+	eg: ./initph.sh john /dev/sdc1
+
+It will create ~/.phome in john's home directory and populate it with a basic config and mountpoints.
+It will also install phome to /usr/local/bin
